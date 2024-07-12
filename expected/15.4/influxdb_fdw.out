@@ -1620,6 +1620,181 @@ SELECT * FROM tmp_time;
  2100-01-01 01:01:01        | 04:05:06 |                     | 
 (6 rows)
 
+-- SELECT with sub-query returning NULL.
+--Testcase 231:
+EXPLAIN VERBOSE
+SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9';
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=10.00..13.00 rows=13 width=8)
+   Output: c3
+   InfluxDB query: SELECT "c3" FROM "tmp_time" WHERE (("c3" = '2022-05-05 22:08:09'))
+(3 rows)
+
+--Testcase 232:
+SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9';
+ c3 
+----
+(0 rows)
+
+--Testcase 233:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE c3 = (SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9');
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=23.00..20.00 rows=7 width=32)
+   Output: tmp_time."time", tmp_time.c1, tmp_time.c2, tmp_time.c3
+   InfluxDB query: SELECT "c1", "c2", "c3" FROM "tmp_time" WHERE (("c3" = $1))
+   InitPlan 1 (returns $0)
+     ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..13.00 rows=13 width=8)
+           Output: tmp_time_1.c3
+           InfluxDB query: SELECT "c3" FROM "tmp_time" WHERE (("c3" = '2022-05-05 22:08:09'))
+(7 rows)
+
+--Testcase 234:
+SELECT * FROM tmp_time WHERE c3 = (SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9');
+ERROR:  influxdb_fdw : cannot bind NULL
+--Testcase 235:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '2022-05-06 07:08:09');
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=23.00..20.00 rows=7 width=32)
+   Output: tmp_time."time", tmp_time.c1, tmp_time.c2, tmp_time.c3
+   InfluxDB query: SELECT "c1", "c2", "c3" FROM "tmp_time" WHERE (("c2" = $1))
+   InitPlan 1 (returns $0)
+     ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..13.00 rows=13 width=8)
+           Output: tmp_time_1.c2
+           InfluxDB query: SELECT "c2" FROM "tmp_time" WHERE (("c2" = '2022-05-06 07:08:09'))
+(7 rows)
+
+--Testcase 236:
+SELECT * FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '2022-05-06 07:08:09');
+        time         |    c1    |         c2          |           c3           
+---------------------+----------+---------------------+------------------------
+ 2022-05-06 07:08:09 | 07:08:09 | 2022-05-06 07:08:09 | 2022-05-06 07:08:09+09
+(1 row)
+
+--Testcase 237:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=20.24..17.24 rows=7 width=32)
+   Output: tmp_time."time", tmp_time.c1, tmp_time.c2, tmp_time.c3
+   InfluxDB query: SELECT "c1", "c2", "c3" FROM "tmp_time" WHERE (("c1" = $1))
+   InitPlan 2 (returns $1)
+     ->  Result  (cost=10.23..10.24 rows=1 width=8)
+           Output: $0
+           InitPlan 1 (returns $0)
+             ->  Limit  (cost=10.00..10.23 rows=1 width=8)
+                   Output: tmp_time_1.c1
+                   ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..13.00 rows=13 width=8)
+                         Output: tmp_time_1.c1
+                         Filter: (tmp_time_1.c1 IS NOT NULL)
+                         InfluxDB query: SELECT "c1" FROM "tmp_time" WHERE (("c1" = '07:08:09'))
+(13 rows)
+
+--Testcase 238:
+SELECT * FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+        time         |    c1    |         c2          |           c3           
+---------------------+----------+---------------------+------------------------
+ 1990-01-01 01:01:01 | 07:08:09 |                     | 
+ 2022-05-06 07:08:09 | 07:08:09 | 2022-05-06 07:08:09 | 2022-05-06 07:08:09+09
+(2 rows)
+
+-- DELETE with time column in the condition
+--Testcase 239:
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM tmp_time WHERE time = (SELECT max(time) FROM tmp_time WHERE time = '1900-01-01 01:01:01');
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Delete on public.tmp_time
+   InitPlan 2 (returns $1)
+     ->  Result
+           Output: $0
+           InitPlan 1 (returns $0)
+             ->  Limit
+                   Output: tmp_time_1."time"
+                   ->  Foreign Scan on public.tmp_time tmp_time_1
+                         Output: tmp_time_1."time"
+                         Filter: (tmp_time_1."time" IS NOT NULL)
+                         InfluxDB query: SELECT * FROM "tmp_time" WHERE ((time = '1900-01-01 01:01:01'))
+   ->  Foreign Delete on public.tmp_time
+         InfluxDB query: DELETE FROM "tmp_time" WHERE ((time = $1))
+(13 rows)
+
+--Testcase 240:
+DELETE FROM tmp_time WHERE time = (SELECT max(time) FROM tmp_time WHERE time = '1900-01-01 01:01:01');
+--Testcase 241:
+SELECT * FROM tmp_time;
+            time            |    c1    |         c2          |              c3              
+----------------------------+----------+---------------------+------------------------------
+ 1990-01-01 01:01:01        | 07:08:09 |                     | 
+ 2020-12-27 03:02:56.634467 |          | 1950-02-02 02:02:02 | 
+ 2021-12-27 03:02:56.668301 |          |                     | 1800-02-02 02:21:01+09:18:59
+ 2022-05-06 07:08:09        | 07:08:09 | 2022-05-06 07:08:09 | 2022-05-06 07:08:09+09
+ 2100-01-01 01:01:01        | 04:05:06 |                     | 
+(5 rows)
+
+-- DELETE with tag/field column in the condition
+--Testcase 242:
+EXPLAIN VERBOSE
+DELETE FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+                                              QUERY PLAN                                               
+-------------------------------------------------------------------------------------------------------
+ Delete on public.tmp_time  (cost=20.24..23.24 rows=0 width=0)
+   InitPlan 2 (returns $1)
+     ->  Result  (cost=10.23..10.24 rows=1 width=8)
+           Output: $0
+           InitPlan 1 (returns $0)
+             ->  Limit  (cost=10.00..10.23 rows=1 width=8)
+                   Output: tmp_time_1.c1
+                   ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..13.00 rows=13 width=8)
+                         Output: tmp_time_1.c1
+                         Filter: (tmp_time_1.c1 IS NOT NULL)
+                         InfluxDB query: SELECT "c1" FROM "tmp_time" WHERE (("c1" = '07:08:09'))
+   ->  Foreign Scan on public.tmp_time  (cost=10.00..13.00 rows=13 width=8)
+         Output: tmp_time."time"
+         InfluxDB query: SELECT * FROM "tmp_time" WHERE (("c1" = $1))
+(14 rows)
+
+--Testcase 243:
+DELETE FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+--Testcase 244:
+SELECT * FROM tmp_time;
+            time            |    c1    |         c2          |              c3              
+----------------------------+----------+---------------------+------------------------------
+ 2020-12-27 03:02:56.634467 |          | 1950-02-02 02:02:02 | 
+ 2021-12-27 03:02:56.668301 |          |                     | 1800-02-02 02:21:01+09:18:59
+ 2100-01-01 01:01:01        | 04:05:06 |                     | 
+(3 rows)
+
+--Testcase 245:
+EXPLAIN VERBOSE
+DELETE FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '1950-02-02 02:02:02');
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Delete on public.tmp_time  (cost=23.00..26.00 rows=0 width=0)
+   InitPlan 1 (returns $0)
+     ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..13.00 rows=13 width=8)
+           Output: tmp_time_1.c2
+           InfluxDB query: SELECT "c2" FROM "tmp_time" WHERE (("c2" = '1950-02-02 02:02:02'))
+   ->  Foreign Scan on public.tmp_time  (cost=10.00..13.00 rows=13 width=8)
+         Output: tmp_time."time"
+         InfluxDB query: SELECT * FROM "tmp_time" WHERE (("c2" = $1))
+(8 rows)
+
+--Testcase 246:
+DELETE FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '1950-02-02 02:02:02');
+--Testcase 247:
+SELECT * FROM tmp_time;
+            time            |    c1    | c2 |              c3              
+----------------------------+----------+----+------------------------------
+ 2021-12-27 03:02:56.668301 |          |    | 1800-02-02 02:21:01+09:18:59
+ 2100-01-01 01:01:01        | 04:05:06 |    | 
+(2 rows)
+
 -- Type mis-match
 --Testcase 212:
 CREATE FOREIGN TABLE datatype_test (

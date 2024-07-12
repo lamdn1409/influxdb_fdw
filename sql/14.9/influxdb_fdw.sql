@@ -612,6 +612,58 @@ INSERT INTO tmp_time (time, c1, c2, c3) VALUES ('2022-05-06 07:08:09', '07:08:09
 -- https://www.timeanddate.com/time/zone/japan/tokyo?syear=1850
 SELECT * FROM tmp_time;
 
+-- SELECT with sub-query returning NULL.
+--Testcase 231:
+EXPLAIN VERBOSE
+SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9';
+--Testcase 232:
+SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9';
+
+--Testcase 233:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE c3 = (SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9');
+--Testcase 234:
+SELECT * FROM tmp_time WHERE c3 = (SELECT c3 FROM tmp_time WHERE c3 = '2022-05-06 07:08:09+9');
+
+--Testcase 235:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '2022-05-06 07:08:09');
+--Testcase 236:
+SELECT * FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '2022-05-06 07:08:09');
+
+--Testcase 237:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+--Testcase 238:
+SELECT * FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+
+-- DELETE with time column in the condition
+--Testcase 239:
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM tmp_time WHERE time = (SELECT max(time) FROM tmp_time WHERE time = '1900-01-01 01:01:01');
+--Testcase 240:
+DELETE FROM tmp_time WHERE time = (SELECT max(time) FROM tmp_time WHERE time = '1900-01-01 01:01:01');
+
+--Testcase 241:
+SELECT * FROM tmp_time;
+
+-- DELETE with tag/field column in the condition
+--Testcase 242:
+EXPLAIN VERBOSE
+DELETE FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+--Testcase 243:
+DELETE FROM tmp_time WHERE c1 = (SELECT max(c1) FROM tmp_time WHERE c1 = '07:08:09');
+--Testcase 244:
+SELECT * FROM tmp_time;
+
+--Testcase 245:
+EXPLAIN VERBOSE
+DELETE FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '1950-02-02 02:02:02');
+--Testcase 246:
+DELETE FROM tmp_time WHERE c2 = (SELECT c2 FROM tmp_time WHERE c2 = '1950-02-02 02:02:02');
+--Testcase 247:
+SELECT * FROM tmp_time;
+
 -- Type mis-match
 --Testcase 212:
 CREATE FOREIGN TABLE datatype_test (

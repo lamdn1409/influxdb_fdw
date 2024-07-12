@@ -1582,6 +1582,176 @@ SELECT * FROM cpu;
  2021-02-03 09:00:03.123457+09 | 2021-02-03T00:00:03.123456789Z | {"tag1": "tag1_C", "tag2": "tag2_D"} | {"value1": "200", "value2": "5.5", "value3": "test", "value4": "true"}
 (5 rows)
 
+-- InfluxDB_FDW will store time data for Field values as a strings
+--Testcase 209:
+CREATE FOREIGN TABLE tmp_time (
+time timestamp,
+tags jsonb OPTIONS (tags 'true'),
+fields jsonb OPTIONS (fields 'true')
+) SERVER server1 OPTIONS (table 'tmp_time', schemaless 'true', tags 'c1');
+-- Use this foreign table to insert data to the table tmp_time in non-schemaless mode.
+--Testcase 210:
+CREATE FOREIGN TABLE tmp_time_nsc (
+time timestamp,
+c1 time,
+c2 timestamp,
+c3 timestamp with time zone
+) SERVER server1 OPTIONS (table 'tmp_time');
+--Testcase 211:
+SELECT * FROM tmp_time_nsc;
+ time | c1 | c2 | c3 
+------+----+----+----
+(0 rows)
+
+--Testcase 212:
+INSERT INTO tmp_time_nsc (time, c1) VALUES ('1900-01-01 01:01:01', '01:02:03');
+--Testcase 213:
+INSERT INTO tmp_time_nsc (time, c1) VALUES ('2100-01-01 01:01:01', '04:05:06');
+--Testcase 214:
+INSERT INTO tmp_time_nsc (time, c1) VALUES ('1990-01-01 01:01:01', '07:08:09');
+--Testcase 215:
+INSERT INTO tmp_time_nsc (time, c2) VALUES ('2020-12-27 03:02:56.634467', '1950-02-02 02:02:02');
+--Testcase 216:
+INSERT INTO tmp_time_nsc (time, c3) VALUES ('2021-12-27 03:02:56.668301', '1800-02-02 02:02:02+9');
+--Testcase 217:
+INSERT INTO tmp_time_nsc (time, c1, c2, c3) VALUES ('2022-05-06 07:08:09', '07:08:09', '2022-05-06 07:08:09', '2022-05-06 07:08:09+9');
+--Testcase 218:
+-- 1800-02-02 02:02:02+9 is Daylight Saving Time (DST) changes in Japan.
+-- Timezone setting Japan so it will plus 18s:59
+-- https://www.timeanddate.com/time/zone/japan/tokyo?syear=1850
+SELECT * FROM tmp_time;
+            time            |        tags        |                            fields                             
+----------------------------+--------------------+---------------------------------------------------------------
+ 1900-01-01 01:01:01        | {"c1": "01:02:03"} | {"c2": null, "c3": null}
+ 1990-01-01 01:01:01        | {"c1": "07:08:09"} | {"c2": null, "c3": null}
+ 2020-12-27 03:02:56.634467 | {"c1": null}       | {"c2": "1950-02-02 02:02:02", "c3": null}
+ 2021-12-27 03:02:56.668301 | {"c1": null}       | {"c2": null, "c3": "1800-02-02 02:21:01+09:18:59"}
+ 2022-05-06 07:08:09        | {"c1": "07:08:09"} | {"c2": "2022-05-06 07:08:09", "c3": "2022-05-06 07:08:09+09"}
+ 2100-01-01 01:01:01        | {"c1": "04:05:06"} | {"c2": null, "c3": null}
+(6 rows)
+
+-- SELECT with sub-query returning NULL.
+--Testcase 219:
+EXPLAIN VERBOSE
+SELECT fields->>'c3' FROM tmp_time WHERE fields->>'c3' = '2022-05-06 07:08:09+9';
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=10.00..7.02 rows=7 width=32)
+   Output: (fields ->> 'c3'::text)
+   InfluxDB query: SELECT "c3" FROM "tmp_time" WHERE (("c3" = '2022-05-06 07:08:09+9'))
+(3 rows)
+
+--Testcase 220:
+SELECT fields->>'c3' FROM tmp_time WHERE fields->>'c3' = '2022-05-06 07:08:09+9';
+ ?column? 
+----------
+(0 rows)
+
+--Testcase 221:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE fields->>'c3' = (SELECT fields->>'c3' FROM tmp_time WHERE fields->>'c3' = '2022-05-06 07:08:09+9');
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=17.02..11.02 rows=4 width=72)
+   Output: tmp_time."time", tmp_time.tags, tmp_time.fields
+   InfluxDB query: SELECT * FROM "tmp_time" WHERE (("c3" = $1))
+   InitPlan 1 (returns $0)
+     ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..7.02 rows=7 width=32)
+           Output: (tmp_time_1.fields ->> 'c3'::text)
+           InfluxDB query: SELECT "c3" FROM "tmp_time" WHERE (("c3" = '2022-05-06 07:08:09+9'))
+(7 rows)
+
+--Testcase 222:
+SELECT * FROM tmp_time WHERE fields->>'c3' = (SELECT fields->>'c3' FROM tmp_time WHERE fields->>'c3' = '2022-05-06 07:08:09+9');
+ERROR:  influxdb_fdw : cannot bind NULL
+--Testcase 223:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE fields->>'c2' = (SELECT fields->>'c2' FROM tmp_time WHERE fields->>'c2' = '2022-05-06 07:08:09');
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=17.02..11.02 rows=4 width=72)
+   Output: tmp_time."time", tmp_time.tags, tmp_time.fields
+   InfluxDB query: SELECT * FROM "tmp_time" WHERE (("c2" = $1))
+   InitPlan 1 (returns $0)
+     ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..7.02 rows=7 width=32)
+           Output: (tmp_time_1.fields ->> 'c2'::text)
+           InfluxDB query: SELECT "c2" FROM "tmp_time" WHERE (("c2" = '2022-05-06 07:08:09'))
+(7 rows)
+
+--Testcase 224:
+SELECT * FROM tmp_time WHERE fields->>'c2' = (SELECT fields->>'c2' FROM tmp_time WHERE fields->>'c2' = '2022-05-06 07:08:09');
+        time         |        tags        |                            fields                             
+---------------------+--------------------+---------------------------------------------------------------
+ 2022-05-06 07:08:09 | {"c1": "07:08:09"} | {"c2": "2022-05-06 07:08:09", "c3": "2022-05-06 07:08:09+09"}
+(1 row)
+
+--Testcase 225:
+EXPLAIN VERBOSE
+SELECT * FROM tmp_time WHERE tags->>'c1' = (SELECT max(tags->>'c1') FROM tmp_time WHERE tags->>'c1' = '07:08:09');
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Foreign Scan on public.tmp_time  (cost=17.05..11.04 rows=4 width=72)
+   Output: tmp_time."time", tmp_time.tags, tmp_time.fields
+   InfluxDB query: SELECT * FROM "tmp_time" WHERE (("c1" = $1))
+   InitPlan 1 (returns $1)
+     ->  Aggregate  (cost=7.04..7.04 rows=1 width=32)
+           Output: max((tmp_time_1.tags ->> 'c1'::text))
+           ->  Foreign Scan on public.tmp_time tmp_time_1  (cost=10.00..7.00 rows=7 width=32)
+                 Output: tmp_time_1."time", tmp_time_1.tags, tmp_time_1.fields
+                 InfluxDB query: SELECT * FROM "tmp_time" WHERE (("c1" = '07:08:09'))
+(9 rows)
+
+--Testcase 226:
+SELECT * FROM tmp_time WHERE tags->>'c1' = (SELECT max(tags->>'c1') FROM tmp_time WHERE tags->>'c1' = '07:08:09');
+        time         |        tags        |                            fields                             
+---------------------+--------------------+---------------------------------------------------------------
+ 1990-01-01 01:01:01 | {"c1": "07:08:09"} | {"c2": null, "c3": null}
+ 2022-05-06 07:08:09 | {"c1": "07:08:09"} | {"c2": "2022-05-06 07:08:09", "c3": "2022-05-06 07:08:09+09"}
+(2 rows)
+
+-- DELETE with time column in the condition.
+--Testcase 227:
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM tmp_time WHERE time = (SELECT max(time) FROM tmp_time WHERE time = '1900-01-01 01:01:01');
+                                               QUERY PLAN                                                
+---------------------------------------------------------------------------------------------------------
+ Delete on public.tmp_time
+   InitPlan 2 (returns $1)
+     ->  Result
+           Output: $0
+           InitPlan 1 (returns $0)
+             ->  Limit
+                   Output: tmp_time_1."time"
+                   ->  Foreign Scan on public.tmp_time tmp_time_1
+                         Output: tmp_time_1."time"
+                         Filter: (tmp_time_1."time" IS NOT NULL)
+                         InfluxDB query: SELECT * FROM "tmp_time" WHERE ((time = '1900-01-01 01:01:01'))
+   ->  Foreign Delete on public.tmp_time
+         InfluxDB query: DELETE FROM "tmp_time" WHERE ((time = $1))
+(13 rows)
+
+--Testcase 228:
+DELETE FROM tmp_time WHERE time = (SELECT max(time) FROM tmp_time WHERE time = '1900-01-01 01:01:01');
+--Testcase 229:
+SELECT * FROM tmp_time;
+            time            |        tags        |                            fields                             
+----------------------------+--------------------+---------------------------------------------------------------
+ 1990-01-01 01:01:01        | {"c1": "07:08:09"} | {"c2": null, "c3": null}
+ 2020-12-27 03:02:56.634467 | {"c1": null}       | {"c2": "1950-02-02 02:02:02", "c3": null}
+ 2021-12-27 03:02:56.668301 | {"c1": null}       | {"c2": null, "c3": "1800-02-02 02:21:01+09:18:59"}
+ 2022-05-06 07:08:09        | {"c1": "07:08:09"} | {"c2": "2022-05-06 07:08:09", "c3": "2022-05-06 07:08:09+09"}
+ 2100-01-01 01:01:01        | {"c1": "04:05:06"} | {"c2": null, "c3": null}
+(5 rows)
+
+-- TODO: Support DELETE with tag/field in the WHERE clause.
+-- There is a bug in this kind of query
+--Testcase 230:
+--EXPLAIN VERBOSE
+--DELETE FROM tmp_time WHERE tags->>'c1' = (SELECT max(tags->>'c1') FROM tmp_time WHERE tags->>'c1' = '07:08:09');
+--Testcase 231:
+--DELETE FROM tmp_time WHERE tags->>'c1' = (SELECT max(tags->>'c1') FROM tmp_time WHERE tags->>'c1' = '07:08:09');
+--Testcase 232:
+--SELECT * FROM tmp_time;
 -- Recover data
 :RECOVER_INIT_TXT_DROP_BUCKET;
 :RECOVER_INIT_TXT_CREATE_BUCKET;
@@ -1591,11 +1761,13 @@ DROP FOREIGN TABLE cpu_nsc;
 DROP USER MAPPING FOR CURRENT_USER SERVER server1;
 --Testcase 202:
 DROP SERVER server1 CASCADE;
-NOTICE:  drop cascades to 5 other objects
+NOTICE:  drop cascades to 7 other objects
 DETAIL:  drop cascades to foreign table cpu
 drop cascades to foreign table numbers
 drop cascades to foreign table t3
 drop cascades to foreign table t4
 drop cascades to foreign table tx
+drop cascades to foreign table tmp_time
+drop cascades to foreign table tmp_time_nsc
 --Testcase 203:
 DROP EXTENSION influxdb_fdw;

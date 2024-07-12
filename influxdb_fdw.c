@@ -212,13 +212,16 @@ static void influxdb_to_pg_type(StringInfo str, char *typname);
 
 static void prepare_query_params(PlanState *node,
 								 List *fdw_exprs,
+								 List *fdw_recheck_quals,
+								 Oid foreigntableid,
 								 int numParams,
 								 FmgrInfo **param_flinfo,
 								 List **param_exprs,
 								 const char ***param_values,
 								 Oid **param_types,
 								 InfluxDBType * *param_influxdb_types,
-								 InfluxDBValue * *param_influxdb_values);
+								 InfluxDBValue * *param_influxdb_values,
+								 InfluxDBColumnInfo * *param_column_info);
 
 static void process_query_params(ExprContext *econtext,
 								 FmgrInfo *param_flinfo,
@@ -1116,15 +1119,20 @@ influxdbBeginForeignScan(ForeignScanState *node, int eflags)
 	numParams = list_length(fsplan->fdw_exprs);
 	festate->numParams = numParams;
 	if (numParams > 0)
+	{
 		prepare_query_params((PlanState *) node,
 							 fsplan->fdw_exprs,
+							 fsplan->fdw_recheck_quals,
+							 rte->relid,
 							 numParams,
 							 &festate->param_flinfo,
 							 &festate->param_exprs,
 							 &festate->param_values,
 							 &festate->param_types,
 							 &festate->param_influxdb_types,
-							 &festate->param_influxdb_values);
+							 &festate->param_influxdb_values,
+							 &festate->param_column_info);
+	}
 }
 
 /*
@@ -1986,7 +1994,7 @@ influxdbBeginForeignModify(ModifyTableState *mtstate,
 	fmstate->query = strVal(list_nth(fdw_private, FdwModifyPrivateUpdateSql));
 	fmstate->retrieved_attrs = (List *) list_nth(fdw_private, FdwModifyPrivateTargetAttnums);
 
-	if (mtstate->operation == CMD_INSERT)
+	if (mtstate->operation == CMD_INSERT || mtstate->operation == CMD_DELETE)
 	{
 		fmstate->column_list = NIL;
 
@@ -2226,8 +2234,14 @@ bindJunkColumnValue(InfluxDBFdwExecState * fmstate,
 			fmstate->param_influxdb_values[bindnum].i = 0;
 		}
 		else
+		{
+			struct InfluxDBColumnInfo *col = list_nth(fmstate->column_list, (int) bindnum);
+
+			fmstate->param_column_info[bindnum].column_type = col->column_type;
+
 			influxdb_bind_sql_var(type, bindnum, value, &is_null, fmstate->param_column_info,
 								  fmstate->param_influxdb_types, fmstate->param_influxdb_values);
+		}
 		bindnum++;
 	}
 }
@@ -2643,13 +2657,16 @@ influxdbBeginDirectModify(ForeignScanState *node, int eflags)
 	if (numParams > 0)
 		prepare_query_params((PlanState *) node,
 							 fsplan->fdw_exprs,
+							 fsplan->fdw_recheck_quals,
+							 rte->relid,
 							 numParams,
 							 &dmstate->param_flinfo,
 							 &dmstate->param_exprs,
 							 &dmstate->param_values,
 							 &dmstate->param_types,
 							 &dmstate->param_influxdb_types,
-							 &dmstate->param_influxdb_values);
+							 &dmstate->param_influxdb_values,
+							 &dmstate->param_column_info);
 }
 
 /*
@@ -3808,13 +3825,16 @@ influxdb_reset_transmission_modes(int nestlevel)
 static void
 prepare_query_params(PlanState *node,
 					 List *fdw_exprs,
+					 List *fdw_recheck_quals,
+					 Oid foreigntableid,
 					 int numParams,
 					 FmgrInfo **param_flinfo,
 					 List **param_exprs,
 					 const char ***param_values,
 					 Oid **param_types,
 					 InfluxDBType * *param_influxdb_types,
-					 InfluxDBValue * *param_influxdb_values)
+					 InfluxDBValue * *param_influxdb_values,
+					 InfluxDBColumnInfo * *param_column_info)
 {
 	int			i;
 	ListCell   *lc;
@@ -3826,6 +3846,7 @@ prepare_query_params(PlanState *node,
 	*param_types = (Oid *) palloc0(sizeof(Oid) * numParams);
 	*param_influxdb_types = (InfluxDBType *) palloc0(sizeof(InfluxDBType) * numParams);
 	*param_influxdb_values = (InfluxDBValue *) palloc0(sizeof(InfluxDBValue) * numParams);
+	*param_column_info = (InfluxDBColumnInfo *)palloc0(sizeof(InfluxDBColumnInfo) * numParams);
 
 	i = 0;
 	foreach(lc, fdw_exprs)
@@ -3833,10 +3854,45 @@ prepare_query_params(PlanState *node,
 		Node	   *param_expr = (Node *) lfirst(lc);
 		Oid			typefnoid;
 		bool		isvarlena;
+		Node	   *comparison_expr;
+		List	   *column_list;
+		Var	   *col;
+		char	   *column_name;
 
 		(*param_types)[i] = exprType(param_expr);
 		getTypeOutputInfo(exprType(param_expr), &typefnoid, &isvarlena);
 		fmgr_info(typefnoid, &(*param_flinfo)[i]);
+
+		/*
+		 * In case param type is kind of time, if column is time key, influxdb handles the comparison as time comparison.
+		 * If column is tag/field key, influxdb handles the comparison as string comparison.
+		 */
+		if ((*param_types)[i] == TIMEOID ||
+			(*param_types)[i] == TIMESTAMPOID ||
+			(*param_types)[i] == TIMESTAMPTZOID)
+		{
+			/* Get column name and set type of column */
+			comparison_expr = (Node *)list_nth(fdw_recheck_quals, i);
+			column_list = pull_var_clause(comparison_expr, PVC_RECURSE_PLACEHOLDERS);
+
+			/*
+			 * Parameter can be bound to a column, for example, c1 = '2015-08-18 09:00:00+09'
+			 * Influxdb_fdw does not support expression, for example (c1 + interval '1d') = '2015-08-18 09:00:00+09'
+			 */
+			if (list_length(column_list) != 1)
+				elog(ERROR, "influxdb_fdw: invalid comparison column");
+
+			col = linitial(column_list);
+
+			column_name = influxdb_get_column_name(foreigntableid, col->varattno);
+			if (INFLUXDB_IS_TIME_COLUMN(column_name))
+				(*param_column_info)[i].column_type = INFLUXDB_TIME_KEY;
+			else if (influxdb_is_tag_key(column_name, foreigntableid))
+				(*param_column_info)[i].column_type = INFLUXDB_TAG_KEY;
+			else
+				(*param_column_info)[i].column_type = INFLUXDB_FIELD_KEY;
+		}
+
 		i++;
 	}
 
